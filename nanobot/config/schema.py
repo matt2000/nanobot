@@ -142,6 +142,16 @@ class QQConfig(BaseModel):
     allow_from: list[str] = Field(default_factory=list)  # Allowed user openids (empty = public access)
 
 
+class SignalConfig(BaseModel):
+    """Signal channel configuration using signal-cli JSON-RPC."""
+    enabled: bool = False
+    account: str = ""  # Phone number registered with signal-cli (e.g. "+1234567890")
+    signal_cli: str = "signal-cli"  # Path to signal-cli binary
+    mode: str = "daemon"  # "daemon" (JSON-RPC via stdio) or "poll" (periodic receive)
+    poll_interval: int = 5  # Seconds between polls in poll mode
+    allow_from: list[str] = Field(default_factory=list)  # Allowed phone numbers
+
+
 class ChannelsConfig(BaseModel):
     """Configuration for chat channels."""
     whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
@@ -153,6 +163,7 @@ class ChannelsConfig(BaseModel):
     email: EmailConfig = Field(default_factory=EmailConfig)
     slack: SlackConfig = Field(default_factory=SlackConfig)
     qq: QQConfig = Field(default_factory=QQConfig)
+    signal: SignalConfig = Field(default_factory=SignalConfig)
 
 
 class AgentDefaults(BaseModel):
@@ -240,12 +251,12 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
-    
+
     @property
     def workspace_path(self) -> Path:
         """Get expanded workspace path."""
         return Path(self.agents.defaults.workspace).expanduser()
-    
+
     def _match_provider(self, model: str | None = None) -> tuple["ProviderConfig | None", str | None]:
         """Match provider config and its registry name. Returns (config, spec_name)."""
         from nanobot.providers.registry import PROVIDERS
@@ -282,7 +293,7 @@ class Config(BaseSettings):
         """Get API key for the given model. Falls back to first available key."""
         p = self.get_provider(model)
         return p.api_key if p else None
-    
+
     def get_api_base(self, model: str | None = None) -> str | None:
         """Get API base URL for the given model. Applies default URLs for known gateways."""
         from nanobot.providers.registry import find_by_name
@@ -297,7 +308,7 @@ class Config(BaseSettings):
             if spec and spec.is_gateway and spec.default_api_base:
                 return spec.default_api_base
         return None
-    
+
     model_config = ConfigDict(
         env_prefix="NANOBOT_",
         env_nested_delimiter="__"
