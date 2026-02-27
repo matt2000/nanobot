@@ -21,10 +21,10 @@ class SignalChannel(BaseChannel):
     Signal channel using signal-cli.
 
     Supports two modes:
-    - **daemon** (default): Launches ``signal-cli -a ACCOUNT daemon --json``
+    - **daemon** (default): Launches ``signal-cli -a ACCOUNT daemon``
       as a subprocess, reading newline-delimited JSON envelopes from stdout
       and writing JSON-RPC send commands to stdin.
-    - **poll**: Periodically runs ``signal-cli -a ACCOUNT receive --json``
+    - **poll**: Periodically runs ``signal-cli -a ACCOUNT receive``
       and parses the output.  Simpler but higher latency.
 
     Prerequisites:
@@ -43,6 +43,7 @@ class SignalChannel(BaseChannel):
         self._poll_task: asyncio.Task | None = None
         self._rpc_id: int = 0
         self._write_lock = asyncio.Lock()
+        self._poll_pause = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -177,11 +178,10 @@ class SignalChannel(BaseChannel):
     # ------------------------------------------------------------------
 
     async def _start_daemon(self) -> None:
-        """Launch ``signal-cli daemon --json`` and read envelopes."""
+        """Launch ``signal-cli daemon`` and read envelopes."""
         cmd = [
             self.config.signal_cli,
-            "-a", self.config.account,
-            "daemon", "--json",
+            "-a", self.config.account, "jsonRpc"
         ]
         logger.info(f"Starting signal-cli daemon: {' '.join(cmd)}")
 
@@ -226,6 +226,7 @@ class SignalChannel(BaseChannel):
                     logger.debug(f"Non-JSON line from signal-cli: {line[:120]}")
                     continue
 
+                logger.debug(f"Received data from signal-cli.")
                 await self._process_envelope(data)
 
             except asyncio.CancelledError:
@@ -254,7 +255,7 @@ class SignalChannel(BaseChannel):
     # ------------------------------------------------------------------
 
     async def _start_poll(self) -> None:
-        """Periodically run ``signal-cli receive --json``."""
+        """Periodically run ``signal-cli receive``."""
         logger.info(
             f"Starting Signal poll mode (every {self.config.poll_interval}s)"
         )
@@ -263,22 +264,33 @@ class SignalChannel(BaseChannel):
 
     async def _poll_loop(self) -> None:
         """Polling loop that runs signal-cli receive."""
+        self._poll_pause = self.config.poll_interval
+        max_pause = self.config.poll_interval * 5
+        if max_pause < 30:
+            max_pause = 30  # enforce a reasonable minimum max pause
         while self._running:
             try:
-                await self._poll_once()
+                got_something = await self._poll_once()
+                if got_something:
+                    self._poll_pause = self.config.poll_interval
+                elif self._poll_pause < max_pause:
+                    # Backoff if we keep getting nothing, up to a max of 5x the base interval.
+                    self._poll_pause += 1
+                if self._poll_pause == (max_pause - 1):
+                    logger.debug(f"Signal poll: no messages, backing off to max pause ({max_pause}s).")
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Signal poll error: {e}")
 
-            await asyncio.sleep(self.config.poll_interval)
+            await asyncio.sleep(self._poll_pause)
 
-    async def _poll_once(self) -> None:
+    async def _poll_once(self) -> bool:
         """Run signal-cli receive once and process envelopes."""
         cmd = [
             self.config.signal_cli,
             "-a", self.config.account,
-            "receive", "--json", "-t", "1",
+             "--output=json", "receive", "-t", "1",
         ]
 
         try:
@@ -292,18 +304,18 @@ class SignalChannel(BaseChannel):
             )
         except asyncio.TimeoutError:
             logger.warning("signal-cli receive timed out")
-            return
+            return False
         except Exception as e:
             logger.error(f"signal-cli receive error: {e}")
-            return
+            return False
 
         if proc.returncode != 0:
             err = stderr.decode().strip() if stderr else "unknown error"
             logger.warning(f"signal-cli receive exited {proc.returncode}: {err}")
-            return
+            return False
 
         if not stdout:
-            return
+            return False
 
         for line in stdout.decode().splitlines():
             line = line.strip()
@@ -314,6 +326,8 @@ class SignalChannel(BaseChannel):
                 await self._process_envelope(data)
             except json.JSONDecodeError:
                 logger.debug(f"Non-JSON line from signal-cli: {line[:120]}")
+
+        return True
 
     # ------------------------------------------------------------------
     # Envelope processing
@@ -396,6 +410,9 @@ class SignalChannel(BaseChannel):
     @staticmethod
     def _is_group_id(value: str) -> bool:
         """Check whether a chat_id looks like a Signal group ID (base64)."""
-        # Signal group IDs are base64-encoded, typically ending with '='
+        # Signal group IDs are base64-encoded, often ending with '='
         # Phone numbers start with '+'
-        return bool(value) and not value.startswith("+")
+        # But a chat ID might be a UUID also.
+        # @TODO: Fix this
+        return False # groups not currently supported, I guess.
+        # Doesn't work because of UUIDs: return bool(value) and not value.startswith("+")
